@@ -33,7 +33,10 @@ class VPG:
     ):
 
         self.env = env
-
+        if self.env.unwrapped.spec is not None:
+            self.env_name = self.env.unwrapped.spec.id
+        else:
+            self.env_name = self.env.unwrapped.__class__.__name__
         self.policy = (
             nn.Sequential(
                 nn.Linear(env.observation_space.shape[0], policy_hidden_layers),
@@ -45,7 +48,6 @@ class VPG:
             .to(device)
             .to(dtype)
         )
-
         self.value = (
             nn.Sequential(
                 nn.Linear(env.observation_space.shape[0], value_hidden_layers),
@@ -64,22 +66,23 @@ class VPG:
         value_lr=VALUE_FN_LEARNING_RATE,
         policy_lr=POLICY_LEARNING_RATE,
         gamma=GAMMA,
-        render=False,
-        plot_rewards=True,
-        VERBOSE=False,
         max_traj_length=MAX_TRAJ_LENGTH,
+        RENDER=False,
+        PLOT_REWARDS=True,
+        VERBOSE=False,
     ):
         """ Trains both policy and value networks """
 
+        hp = locals()
         print(
-            f"\nTraining model for {epochs} epochs with "
-            f"{episodes_per_epoch} episodes per epoch ...\n"
+            f"\nTraining model on {self.env_name} | "
+            f"Observation Space: {self.env.observation_space} | "
+            f"Action Space: {self.env.action_space}\n"
+            f"Hyperparameters: \n{hp}\n"
         )
         start_time = time.time()
-
         self.policy.train()
         self.value.train()
-
         value_optim = torch.optim.Adam(self.value.parameters(), lr=value_lr)
         policy_optim = torch.optim.Adam(self.policy.parameters(), lr=policy_lr)
         rewards = []
@@ -112,7 +115,7 @@ class VPG:
 
                 # run for single trajectory
                 for i in range(max_traj_length):
-                    if render and (
+                    if RENDER and (
                         e == 0 or (e % ((epochs * episodes_per_epoch) / 10)) == 0
                     ):
                         self.env.render()
@@ -196,14 +199,18 @@ class VPG:
                     f" Policy Loss = {policy_loss.item():.2f}"
                 )
 
+        self.env.close()
         print(f"\nTraining Completed in {(time.time() - start_time):.2f} seconds")
-
-        if plot_rewards:
+        if PLOT_REWARDS:
             plt.plot(rewards)
+            plt.savefig(
+                f"./plots/{self.__class__.__name__}_{self.env_name}_reward_plot.png"
+            )
 
-    def save(self, path):
+    def save(self, path=None):
         """ Save model parameters """
-
+        if path is None:
+            path = f"./models/{self.__class__.__name__}_{self.env_name}.pt"
         torch.save(
             {
                 "policy_state_dict": self.policy.state_dict(),
@@ -213,9 +220,10 @@ class VPG:
         )
         print(f"\nSaved model parameters to {path}")
 
-    def load(self, path):
+    def load(self, path=None):
         """ Load model parameters """
-
+        if path is None:
+            path = f"./models/{self.__class__.__name__}_{self.env_name}.pt"
         checkpoint = torch.load(path)
         self.policy.load_state_dict(checkpoint["policy_state_dict"])
         self.value.load_state_dict(checkpoint["value_state_dict"])
@@ -234,7 +242,7 @@ class VPG:
             observation = self.env.reset()
             observation = torch.tensor(observation, device=device, dtype=dtype)
             done = False
-            episode_reward = 0.0
+            episode_rewards = []
 
             while not done:
                 if render:
@@ -244,38 +252,37 @@ class VPG:
                 action_distribution = torch.distributions.Categorical(action_probs)
                 action = action_distribution.sample()
 
-                observation, reward, done, _ = self.env.step(action.item())
+                next_observation, reward, done, _ = self.env.step(action.item())
+                episode_rewards.append(float(reward))
+                next_observation = torch.tensor(
+                    next_observation, device=device, dtype=dtype
+                )
+                observation = next_observation
 
-                observation = torch.tensor(observation, device=device, dtype=dtype)
-                episode_reward += reward
+            total_episode_reward = sum(episode_rewards)
+            rewards.append(total_episode_reward)
+            print(
+                f"Episode {episode+1}: Total Episode Reward = {total_episode_reward:.2f}"
+            )
+            rewards.append(total_episode_reward)
 
-            print(f"Episode {episode+1}: Total Episode Reward = {episode_reward:.2f}")
-            rewards.append(episode_reward)
-
-        avg_reward = sum(rewards) / len(rewards)
-        print(f"\nAverage Reward for an episode = {avg_reward:.2f}")
+        env.close()
+        print(f"\nAverage Reward for an episode = {np.mean(rewards):.2f}")
         print(f"Evaluation Completed in {(time.time() - start_time):.2f} seconds")
 
 
 if __name__ == "__main__":
-    import gym
-    import random
-    from pybullet_envs.bullet.racecarGymEnv import RacecarGymEnv
 
-    # Load environment
-    # env_name = "LunarLander-v2"
-    # env_name = "CartPole-v1"
-    # env = gym.make(env_name)
-    env = RacecarGymEnv(renders=False, isDiscrete=True)
-    env_name = "RacecarBulletEnv"
-    print(
-        f"Env: {env_name} |"
-        f" Observation Space: {env.observation_space} |"
-        f" Action Space: {env.action_space}"
-    )
+    # import gym
+    # env = gym.make("CartPole-v1")
+    # env = gym.make("LunarLander-v2")
+
+    from pybullet_envs import bullet
+
+    env = bullet.racecarGymEnv.RacecarGymEnv(renders=False, isDiscrete=True)
 
     model = VPG(env)
-    model.train()
-    model.save(f"models/vpg_torch_{env_name}.pt")
-    # model.load(f"vpg_torch_{env.unwrapped.spec.id}.pt")
-    model.eval(10, render=True)
+    model.train(VERBOSE=True, PLOT_REWARDS=True, SAVE_FREQUENCY=10)
+    model.save()
+    # model.load()
+    model.eval(10, RENDER=True)

@@ -5,7 +5,6 @@
 # https://arxiv.org/pdf/1801.01290.pdf
 # https://spinningup.openai.com/en/latest/algorithms/sac.html
 
-
 import torch
 import torch.nn as nn
 import numpy as np
@@ -26,15 +25,15 @@ POLICY_HIDDEN_DIM = 32
 Q_LEARNING_RATE = 1e-3
 P_LEARNING_RATE = 1e-3
 GAMMA = 0.99
-ENTROPY_TEMP = 0.02 # Entropy regularizer. Equivalent to inverse of reward scale
+ENTROPY_TEMP = 0.02  # Entropy regularizer. Equivalent to inverse of reward scale
 BATCH_SIZE = 128
 POLYAK_CONST = 0.995
-MAX_BUFFER_SIZE = 3000
-STEPS_TO_UPDATE_AFTER = TIMESTEPS / 10
+MAX_BUFFER_SIZE = TIMESTEPS // 2
+STEPS_TO_UPDATE_AFTER = TIMESTEPS // 10
 UPDATE_INTERVAL = 1
-STEPS_TO_SELECT_FROM_MODEL_AFTER = TIMESTEPS / 5
+STEPS_TO_SELECT_FROM_MODEL_AFTER = TIMESTEPS // 5
 MAX_TRAJ_LENGTH = 1000  # For pendulum this is 200
-SAVE_FREQUENCY = None
+
 EPS = 1e-4
 LOG_MAX = 2
 LOG_MIN = -20
@@ -50,12 +49,16 @@ class Actor(nn.Module):
         super(Actor, self).__init__()
         self.scale_factor = upper_lim - lower_lim
         self.range_midpoint = (upper_lim + lower_lim) / 2
-        self.common_model = nn.Sequential(
+        self.common_model = (
+            nn.Sequential(
                 nn.Linear(s_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
-            ).to(device).to(dtype)
+            )
+            .to(device)
+            .to(dtype)
+        )
         self.mean_head = nn.Linear(hidden_dim, a_dim).to(device).to(dtype)
         self.std_dev_head = nn.Linear(hidden_dim, a_dim).to(device).to(dtype)
 
@@ -76,7 +79,7 @@ class Actor(nn.Module):
         if deterministic:
             action = mean
         else:
-            action = action_dist.rsample()        
+            action = action_dist.rsample()
 
         # compute log probabilities if required and appply correction for tanh squashing
         if get_logprob:
@@ -85,15 +88,15 @@ class Actor(nn.Module):
             # Appendix C of https://arxiv.org/pdf/1801.01290.pdf for correction
             # logprob -= torch.log(1 - action.pow(2) + EPS)
 
-            # More numerically stable version of the correction - 
+            # More numerically stable version of the correction -
             # https://github.com/openai/spinningup/blob/038665d62d569055401d91856abb287263096178/spinup/algos/pytorch/sac/core.py#L60
-            logprob -= (2*(np.log(2) - logprob - nn.functional.softplus(-2*logprob)))
+            logprob -= 2 * (np.log(2) - logprob - nn.functional.softplus(-2 * logprob))
 
             logprob = logprob.sum(axis=-1, keepdim=True)
 
         else:
             logprob = None
-    
+
         # squash and rescale action value
         action = torch.tanh(action) * self.scale_factor + self.range_midpoint
 
@@ -105,13 +108,17 @@ class Critic(nn.Module):
         super(Critic, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.model = nn.Sequential(
+        self.model = (
+            nn.Sequential(
                 nn.Linear(s_dim + a_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, 1),
-            ).to(device).to(dtype)
+            )
+            .to(device)
+            .to(dtype)
+        )
 
     def forward(self, s, a):
         x = torch.cat([s.view(-1, self.s_dim), a.view(-1, self.a_dim)], dim=1)
@@ -125,6 +132,10 @@ class SAC:
     ):
 
         self.env = env
+        if self.env.unwrapped.spec is not None:
+            self.env_name = self.env.unwrapped.spec.id
+        else:
+            self.env_name = self.env.unwrapped.__class__.__name__
         self.action_shape = env.action_space.shape
         self.observation_shape = env.observation_space.shape
         self.action_min = env.action_space.low[0]
@@ -141,17 +152,25 @@ class SAC:
                 p.requires_grad = False
 
         self.policy = Actor(
-            self.observation_shape[0], policy_hidden_dim, self.action_shape[0], self.action_max, self.action_min
+            self.observation_shape[0],
+            policy_hidden_dim,
+            self.action_shape[0],
+            self.action_max,
+            self.action_min,
         )
 
-    def _select_action(self, observation, select_after=0, step_count=0, deterministic=False):
+    def _select_action(
+        self, observation, select_after=0, step_count=0, deterministic=False
+    ):
         if step_count < select_after:
-            action = torch.tensor(env.action_space.sample(), device=device, dtype=dtype).unsqueeze(0)
+            action = torch.tensor(
+                env.action_space.sample(), device=device, dtype=dtype
+            ).unsqueeze(0)
         else:
             with torch.no_grad():
-                action, _ = self.policy.sample_action(observation, get_logprob=False, deterministic=deterministic)
-                # import pdb; pdb.set_trace();
-
+                action, _ = self.policy.sample_action(
+                    observation, get_logprob=False, deterministic=deterministic
+                )
 
         return action
 
@@ -161,10 +180,9 @@ class SAC:
         batch_size,
         q_optimizers,
         policy_optimizer,
-        timestep,
         gamma,
         polyak_const,
-        temp
+        temp,
     ):
 
         # Get a batch of samples and unwrap them
@@ -177,16 +195,18 @@ class SAC:
             # Compute nexy action by sample from policy
             next_action, logprob = self.policy.sample_action(sample.next_observation)
             # Use minimum next state Q value estimate for computing target
-            next_state_q_val = torch.min(*[Q(sample.next_observation, next_action) for Q in self.target_Qs])
+            next_state_q_val = torch.min(
+                *[Q(sample.next_observation, next_action) for Q in self.target_Qs]
+            )
             # Compute targets using entropy objective
-            target_q_vals = sample.reward + gamma * (next_state_q_val - temp * logprob) * (~sample.done)
+            target_q_vals = sample.reward + gamma * (
+                next_state_q_val - temp * logprob
+            ) * (~sample.done)
 
-        # import pdb; pdb.set_trace();
-        
         # Update all the Q networks
         q_loss = 0.0
         for Q, target_Q, q_optimizer in zip(self.Qs, self.target_Qs, q_optimizers):
-           
+
             # Compute the current Q values for each state action pair in batch
             q_vals = Q(sample.observation, sample.action)
 
@@ -205,7 +225,7 @@ class SAC:
         # Compute the policy loss, backpropogate and update the gradients
         policy_optimizer.zero_grad()
         action, logprob = self.policy.sample_action(sample.observation)
-        min_q_val =  torch.min(*[Q(sample.observation, action) for Q in self.Qs])
+        min_q_val = torch.min(*[Q(sample.observation, action) for Q in self.Qs])
         policy_loss = -1 * torch.mean(min_q_val - temp * logprob)
         policy_loss.backward()
         policy_optimizer.step()
@@ -221,7 +241,7 @@ class SAC:
                 for p_target, p in zip(target_Q.parameters(), Q.parameters()):
                     p_target.data.mul_(polyak_const)
                     p_target.data.add_((1 - polyak_const) * p.data)
-                    
+
         return q_loss, policy_loss.item()
 
     def train(
@@ -238,26 +258,18 @@ class SAC:
         update_every=UPDATE_INTERVAL,
         select_after=STEPS_TO_SELECT_FROM_MODEL_AFTER,
         max_traj_length=MAX_TRAJ_LENGTH,
-        save_freq=SAVE_FREQUENCY,
-        render=False,
-        plot_rewards=True,
+        SAVE_FREQUENCY=None,
+        RENDER=False,
         VERBOSE=False,
         PLOT_REWARDS=False,
     ):
         """ Trains q and policy network """
-
+        hp = locals()
         print(
-            f"\nTraining model for {timesteps} timesteps with - \n"
-            f"q learning rate: {q_lr}\n"
-            f"policy learning rate: {p_lr}\n"
-            f"gamma:  {gamma}\n"
-            f"batch size:  {batch_size}\n"
-            f"polyak constant:  {polyak_const}\n"
-            f"maximum buffer capacity: {max_buffer_size}\n"
-            f"minimum steps to select random for: {select_after}\n"
-            f"minimum steps before updating network:  {update_after}\n"
-            f"interval for updating: {update_every}\n"
-            f"maximum trajectory length:  {max_traj_length}\n"
+            f"\nTraining model on {self.env_name} | "
+            f"Observation Space: {self.env.observation_space} | "
+            f"Action Space: {self.env.action_space}\n"
+            f"Hyperparameters: \n{hp}\n"
         )
         start_time = time.time()
         self.policy.train()
@@ -270,7 +282,6 @@ class SAC:
         step_count = 0
 
         for episode in count():
-
             observation = self.env.reset()
             observation = torch.tensor(
                 observation, device=device, dtype=dtype
@@ -280,17 +291,21 @@ class SAC:
 
             for _ in range(max_traj_length):
                 step_count += 1
-                if render:
+                if RENDER:
                     self.env.render()
 
-                action = self._select_action(observation, select_after, step_count, deterministic=False)
+                action = self._select_action(
+                    observation, select_after, step_count, deterministic=False
+                )
                 next_observation, reward, done, _ = self.env.step(action[0])
                 episode_rewards.append(float(reward))
                 next_observation = torch.tensor(
                     next_observation, device=device, dtype=dtype
                 ).unsqueeze(0)
                 reward = torch.tensor([reward], device=device, dtype=dtype).unsqueeze(0)
-                done = torch.tensor([done], device=device, dtype=torch.bool).unsqueeze(0)
+                done = torch.tensor([done], device=device, dtype=torch.bool).unsqueeze(
+                    0
+                )
 
                 transition = Transition(
                     observation, action, reward, next_observation, done
@@ -305,15 +320,17 @@ class SAC:
                         batch_size,
                         q_optimizers,
                         policy_optimizer,
-                        timesteps,
                         gamma,
                         polyak_const,
-                        temp
+                        temp,
                     )
 
-                if save_freq is not None:
-                    if step_count >= update_after and step_count % save_freq == 0:
-                        model.save(f"models/models/ddpg_torch_{step_count}")
+                if SAVE_FREQUENCY is not None:
+                    if (
+                        step_count >= update_after
+                        and step_count % (timesteps // SAVE_FREQUENCY) == 0
+                    ):
+                        model.save()
 
                 if done or step_count == timesteps:
                     break
@@ -333,16 +350,22 @@ class SAC:
                     print(f" Q Loss = {q_loss:.2f} | Policy Loss = {policy_loss:.2f}")
                 else:
                     print("Collecting Experience")
-            
+
+        self.env.close()
         print(f"\nTraining Completed in {(time.time() - start_time):.2f} seconds")
         if PLOT_REWARDS:
             plt.plot(rewards)
-            plt.savefig("sac_reward_plot.png")
-        env.close()
+            plt.title(f"Training {self.__class__.__name__} on {self.env_name}")
+            plt.xlabel("Episodes")
+            plt.ylabel("Rewards")
+            plt.savefig(
+                f"./plots/{self.__class__.__name__}_{self.env_name}_reward_plot.png"
+            )
 
-    def save(self, path):
+    def save(self, path=None):
         """ Save model parameters """
-
+        if path is None:
+            path = f"./models/{self.__class__.__name__}_{self.env_name}.pt"
         torch.save(
             {
                 "q1_state_dict": self.Qs[0].state_dict(),
@@ -353,16 +376,17 @@ class SAC:
         )
         print(f"\nSaved model parameters to {path}")
 
-    def load(self, path):
+    def load(self, path=None):
         """ Load model parameters """
-
+        if path is None:
+            path = f"./models/{self.__class__.__name__}_{self.env_name}.pt"
         checkpoint = torch.load(path)
         self.Q[0].load_state_dict(checkpoint["q1_state_dict"])
         self.Q[1].load_state_dict(checkpoint["q2_state_dict"])
         self.policy.load_state_dict(checkpoint["policy_state_dict"])
         print(f"\nLoaded model parameters from {path}")
 
-    def eval(self, episodes, deterministic=True, render=False):
+    def eval(self, episodes, deterministic=True, RENDER=False):
         """ Evaluates model performance """
 
         print(f"\nEvaluating model for {episodes} episodes ...\n")
@@ -378,12 +402,12 @@ class SAC:
             episode_rewards = []
 
             while not done:
-                if render:
+                if RENDER:
                     self.env.render()
 
                 action = self._select_action(observation, deterministic=deterministic)
                 next_observation, reward, done, _ = self.env.step(action.detach())
-                episode_rewards.append(reward)
+                episode_rewards.append(float(reward))
                 next_observation = torch.tensor(
                     next_observation, device=device, dtype=dtype
                 )
@@ -402,24 +426,17 @@ class SAC:
 
 
 if __name__ == "__main__":
-    import gym
-    import random
 
-    from pybullet_envs.bullet.racecarGymEnv import RacecarGymEnv
+    # import gym
+    # env = gym.make("CartPole-v1")
+    # env = gym.make("LunarLander-v2")
 
-    # Load environment
-    env_name = "RacecarBulletEnv"; env = RacecarGymEnv(renders=False, isDiscrete=False)
-    # env_name = "Pendulum-v0"; env = gym.make(env_name)
-    # env_name = "MountainCarContinuous-v0"; env = gym.make(env_name)
+    from pybullet_envs import bullet
 
-    print(
-        f"Env: {env_name} |"
-        f" Observation Space: {env.observation_space} |"
-        f" Action Space: {env.action_space}"
-    )
+    env = bullet.racecarGymEnv.RacecarGymEnv(renders=False, isDiscrete=False)
 
     model = SAC(env)
-    model.train(VERBOSE=True, PLOT_REWARDS=True)
-    model.save(f"models/sac_torch_{env_name}.pt")
-    # model.load(f"models/sac_torch_{env_name}.pt")
-    model.eval(10, render=True)
+    model.train(VERBOSE=True, PLOT_REWARDS=True, SAVE_FREQUENCY=10)
+    model.save()
+    # model.load()
+    model.eval(10, RENDER=True)

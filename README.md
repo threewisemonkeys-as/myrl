@@ -19,5 +19,6 @@ Algorithms -
 
 Features to add -
 - [ ] Better hyperparamter management
+- [ ] Adding tensorboard logging
 - [ ] Add documentation for each algorithm
 - [ ] Add results for each algorithm
