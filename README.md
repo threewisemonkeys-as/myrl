@@ -14,7 +14,7 @@ Algorithms -
 - [X] Deep Deterministic Policy Gradient (DDPG)
 - [X] Twin Delayed DDPG (TD3)
 - [X] Soft Actor Critic
-- [ ] Proximal Policy Optimization
+- [X] Proximal Policy Optimization
 - [ ] Trust Region Policy Optimization
 
 Features to add -
