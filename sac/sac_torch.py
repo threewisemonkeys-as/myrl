@@ -3,17 +3,19 @@
 
 # References -
 # https://arxiv.org/pdf/1801.01290.pdf
+# https://arxiv.org/pdf/1812.05905.pdf
 # https://spinningup.openai.com/en/latest/algorithms/sac.html
 
-import torch
-import torch.nn as nn
-import numpy as np
-from collections import deque, namedtuple
-from itertools import count
-import matplotlib.pyplot as plt
-import time
 import copy
 import random
+import time
+from collections import deque, namedtuple
+from itertools import count
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.double
@@ -25,7 +27,8 @@ POLICY_HIDDEN_DIM = 32
 Q_LEARNING_RATE = 1e-3
 P_LEARNING_RATE = 1e-3
 GAMMA = 0.99
-ENTROPY_TEMP = 0.02  # Entropy regularizer. Equivalent to inverse of reward scale
+# ENTROPY_TEMP = 0.02  # Entropy regularizer. Equivalent to inverse of reward scale
+ENTROPY_TEMP_LEARNING_RATE = 1e-3
 BATCH_SIZE = 128
 POLYAK_CONST = 0.995
 MAX_BUFFER_SIZE = TIMESTEPS // 2
@@ -128,14 +131,14 @@ class Critic(nn.Module):
 # Model
 class SAC:
     def __init__(
-        self, env, q_hidden_dim=Q_HIDDEN_DIM, policy_hidden_dim=POLICY_HIDDEN_DIM,
+        self, env, q_hidden_dim=Q_HIDDEN_DIM, policy_hidden_dim=POLICY_HIDDEN_DIM
     ):
 
         self.env = env
         if self.env.unwrapped.spec is not None:
-            self.env_name = self.env.unwrapped.spec.id
+            self.env_name = env.unwrapped.spec.id
         else:
-            self.env_name = self.env.unwrapped.__class__.__name__
+            self.env_name = env.unwrapped.__class__.__name__
         self.action_shape = env.action_space.shape
         self.observation_shape = env.observation_space.shape
         self.action_min = env.action_space.low[0]
@@ -158,6 +161,12 @@ class SAC:
             self.action_max,
             self.action_min,
         )
+
+        self.entropy_temp_log = torch.zeros(
+            1, device=device, dtype=dtype, requires_grad=True
+        )
+        self.entropy_temp = torch.exp(self.entropy_temp_log).item()
+        self.target_entropy = np.prod(self.action_shape)
 
     def _select_action(
         self, observation, select_after=0, step_count=0, deterministic=False
@@ -182,7 +191,7 @@ class SAC:
         policy_optimizer,
         gamma,
         polyak_const,
-        temp,
+        entropy_temp_optimizer,
     ):
 
         # Get a batch of samples and unwrap them
@@ -200,7 +209,7 @@ class SAC:
             )
             # Compute targets using entropy objective
             target_q_vals = sample.reward + gamma * (
-                next_state_q_val - temp * logprob
+                next_state_q_val - self.entropy_temp * logprob
             ) * (~sample.done)
 
         # Update all the Q networks
@@ -226,7 +235,7 @@ class SAC:
         policy_optimizer.zero_grad()
         action, logprob = self.policy.sample_action(sample.observation)
         min_q_val = torch.min(*[Q(sample.observation, action) for Q in self.Qs])
-        policy_loss = -1 * torch.mean(min_q_val - temp * logprob)
+        policy_loss = -1 * torch.mean(min_q_val - self.entropy_temp * logprob)
         policy_loss.backward()
         policy_optimizer.step()
 
@@ -234,6 +243,15 @@ class SAC:
         for Q in self.Qs:
             for p in Q.parameters():
                 p.requires_grad = True
+
+        # Tune entropy regularization temperature
+        entropy_temp_optimizer.zero_grad()
+        entropy_temp_loss = -1 * torch.mean(
+            self.entropy_temp_log * (logprob + self.target_entropy).detach()
+        )
+        entropy_temp_loss.backward()
+        entropy_temp_optimizer.step()
+        self.entropy_temp = torch.exp(self.entropy_temp_log).item()
 
         # Update target q networks with polyak averaging
         for Q, target_Q in zip(self.Qs, self.target_Qs):
@@ -249,8 +267,8 @@ class SAC:
         timesteps=TIMESTEPS,
         q_lr=Q_LEARNING_RATE,
         p_lr=P_LEARNING_RATE,
+        t_lr=ENTROPY_TEMP_LEARNING_RATE,
         gamma=GAMMA,
-        temp=ENTROPY_TEMP,
         batch_size=BATCH_SIZE,
         polyak_const=POLYAK_CONST,
         max_buffer_size=MAX_BUFFER_SIZE,
@@ -277,6 +295,7 @@ class SAC:
             Q.train()
         q_optimizers = [torch.optim.Adam(Q.parameters(), lr=q_lr) for Q in self.Qs]
         policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=p_lr)
+        entropy_temp_optimizer = torch.optim.Adam([self.entropy_temp_log], lr=t_lr)
         replay_buffer = deque(maxlen=max_buffer_size)
         rewards = []
         step_count = 0
@@ -322,7 +341,7 @@ class SAC:
                         policy_optimizer,
                         gamma,
                         polyak_const,
-                        temp,
+                        entropy_temp_optimizer,
                     )
 
                 if SAVE_FREQUENCY is not None:
@@ -330,7 +349,7 @@ class SAC:
                         step_count >= update_after
                         and step_count % (timesteps // SAVE_FREQUENCY) == 0
                     ):
-                        model.save()
+                        self.save()
 
                 if done or step_count == timesteps:
                     break
@@ -428,8 +447,7 @@ class SAC:
 if __name__ == "__main__":
 
     # import gym
-    # env = gym.make("CartPole-v1")
-    # env = gym.make("LunarLander-v2")
+    # env = gym.make("Pendulum-v0")
 
     from pybullet_envs import bullet
 

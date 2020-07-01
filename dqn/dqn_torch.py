@@ -4,15 +4,16 @@
 # References -
 # https://www.cs.toronto.edu/~vmnih/docs/dqn.pdf
 
-import torch
-import torch.nn as nn
-import numpy as np
-from collections import deque, namedtuple
-from itertools import count
-import matplotlib.pyplot as plt
-import time
 import copy
 import random
+import time
+from collections import deque, namedtuple
+from itertools import count
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.double
@@ -178,7 +179,7 @@ class DQN:
                         len(replay_buffer) >= min_buffer_size
                         and step_count % (timesteps // SAVE_FREQUENCY) == 0
                     ):
-                        model.save()
+                        self.save()
 
                 if done or step_count == timesteps:
                     break

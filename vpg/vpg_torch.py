@@ -4,20 +4,21 @@
 # References -
 # https://spinningup.openai.com/en/latest/algorithms/vpg.html
 
+import time
+
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-import matplotlib.pyplot as plt
-import time
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.double
 
 # Hyperparameters
-EPOCHS = 100
+EPOCHS = 200
 EPISODES_PER_EPOCH = 4
-POLICY_HIDDEN_LAYERS = 128
-VALUE_HIDDEN_LAYERS = 128
+POLICY_HIDDEN_LAYERS = 32
+VALUE_HIDDEN_LAYERS = 32
 GAMMA = 0.99
 VALUE_FN_LEARNING_RATE = 1e-2
 POLICY_LEARNING_RATE = 1e-3
@@ -100,7 +101,7 @@ class VPG:
             )
 
             # Sample trajectories
-            for episode in range(episodes_per_epoch):
+            for _ in range(episodes_per_epoch):
 
                 # initialise tracking variables
                 observation = self.env.reset()
@@ -273,16 +274,16 @@ class VPG:
 
 if __name__ == "__main__":
 
-    # import gym
-    # env = gym.make("CartPole-v1")
+    import gym
+
+    env = gym.make("CartPole-v1")
     # env = gym.make("LunarLander-v2")
 
-    from pybullet_envs import bullet
-
-    env = bullet.racecarGymEnv.RacecarGymEnv(renders=False, isDiscrete=True)
+    # from pybullet_envs import bullet
+    # env = bullet.racecarGymEnv.RacecarGymEnv(renders=False, isDiscrete=True)
 
     model = VPG(env)
-    model.train(VERBOSE=True, PLOT_REWARDS=True, SAVE_FREQUENCY=10)
+    model.train(VERBOSE=True, PLOT_REWARDS=True)
     model.save()
     # model.load()
-    model.eval(10, RENDER=True)
+    model.eval(10)
