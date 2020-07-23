@@ -126,8 +126,8 @@ class SAC:
         self.action_min = env.action_space.low[0]
         self.action_max = env.action_space.high[0]
 
-        Q1 = Critic(self.observation_shape[0], self.action_shape[0], q_hidden_dim)
-        Q2 = Critic(self.observation_shape[0], self.action_shape[0], q_hidden_dim)
+        Q1 = Critic(self.observation_shape[0], self.action_shape[0], q_hidden_dim).to(device).to(dtype)
+        Q2 = Critic(self.observation_shape[0], self.action_shape[0], q_hidden_dim).to(device).to(dtype)
         target_Q1 = copy.deepcopy(Q1)
         target_Q2 = copy.deepcopy(Q2)
         self.Qs = [Q1, Q2]
@@ -142,7 +142,7 @@ class SAC:
             self.action_shape[0],
             self.action_max,
             self.action_min,
-        )
+        ).to(device).to(dtype)
 
         self.entropy_temp_log = torch.zeros(
             1, device=device, dtype=dtype, requires_grad=True
@@ -252,7 +252,7 @@ class SAC:
             if not random_action:
                 action = self._select_action(observation, deterministic=False)
             else:
-                action = torch.tensor([self.env.action_space.sample()], dtype=dtype)
+                action = torch.tensor([self.env.action_space.sample()], device=device, dtype=dtype)
 
             next_observation, reward, done, _ = self.env.step(action)
             episode_rewards.append(float(reward))
@@ -304,7 +304,7 @@ class SAC:
         rewards = []
 
         try:
-            print("Collecting Random Experience ...")
+            print(f"Collecting {args.init_samples} Random Experiences ...")
             for i in range(args.init_samples):
                 self._sample_traj(
                     replay_buffer, args.max_traj_length, random_action=True
@@ -339,7 +339,7 @@ class SAC:
                 # Log rewards and losses
                 if args.verbose:
                     print(
-                        f"Epoch {e+1}: Reward = {np.mean(rewards[-args.samples_per_epoch:]):.2f} | ",
+                        f"Epoch {e+1}: Average Reward = {np.mean(rewards[-args.samples_per_epoch:]):.2f} | ",
                         end="",
                     )
                     print(
@@ -489,11 +489,11 @@ if __name__ == "__main__":
         help="Maximum number of timesteps in a trajectory.",
     )
     parser.add_argument(
-        "--batch_size", default=128, type=int, metavar="B", help="Learner batch size."
+        "--batch_size", default=512, type=int, metavar="B", help="Learner batch size."
     )
     parser.add_argument(
         "--max_buffer_size",
-        default=1000 * 250,
+        default=2000 * 250,
         type=int,
         help="Maximum size of replay buffer.",
     )
