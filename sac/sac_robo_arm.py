@@ -11,7 +11,6 @@ import random
 import traceback
 from collections import deque, namedtuple
 from datetime import datetime
-from itertools import count
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -20,6 +19,7 @@ import torch
 import torch.nn as nn
 
 dtype = torch.double
+
 
 EPS = 1e-4
 LOG_MAX = 2
@@ -150,18 +150,11 @@ class SAC:
         self.entropy_temp = torch.exp(self.entropy_temp_log).item()
         self.target_entropy = -1 * np.prod(self.action_shape)
 
-    def _select_action(
-        self, observation, select_after=0, step_count=0, deterministic=False
-    ):
-        if step_count < select_after:
-            action = torch.tensor(
-                env.action_space.sample(), device=device, dtype=dtype
-            ).unsqueeze(0)
-        else:
-            with torch.no_grad():
-                action, _ = self.policy.sample_action(
-                    observation, get_logprob=False, deterministic=deterministic
-                )
+    def _select_action(self, observation, deterministic=False):
+        with torch.no_grad():
+            action, _ = self.policy.sample_action(
+                observation, get_logprob=False, deterministic=deterministic
+            )
 
         return action
 
@@ -174,7 +167,6 @@ class SAC:
         gamma,
         polyak_const,
         entropy_temp_optimizer,
-        grad_norm_clip,
     ):
 
         # Get a batch of samples and unwrap them
@@ -206,7 +198,6 @@ class SAC:
             q_optimizer.zero_grad()
             curr_q_loss = nn.MSELoss()(target_q_vals, q_vals)
             curr_q_loss.backward()
-            nn.utils.clip_grad_norm_(Q.parameters(), grad_norm_clip)
             q_optimizer.step()
             q_loss += float(curr_q_loss)
 
@@ -221,7 +212,6 @@ class SAC:
         min_q_val = torch.min(*[Q(sample.observation, action) for Q in self.Qs])
         policy_loss = -1 * torch.mean(min_q_val - self.entropy_temp * logprob)
         policy_loss.backward()
-        nn.utils.clip_grad_norm_(self.policy.parameters(), grad_norm_clip)
         policy_optimizer.step()
 
         # Turn on gradient calculation for Q networks after policy update
@@ -230,13 +220,13 @@ class SAC:
                 p.requires_grad = True
 
         # Tune entropy regularization temperature
-        # entropy_temp_optimizer.zero_grad()
-        # entropy_temp_loss = -1 * torch.mean(
-        #     self.entropy_temp_log * (logprob + self.target_entropy).detach()
-        # )
-        # entropy_temp_loss.backward()
-        # entropy_temp_optimizer.step()
-        self.entropy_temp = 0.02  # torch.exp(self.entropy_temp_log).item()
+        entropy_temp_optimizer.zero_grad()
+        entropy_temp_loss = -1 * torch.mean(
+            self.entropy_temp_log * (logprob + self.target_entropy).detach()
+        )
+        entropy_temp_loss.backward()
+        entropy_temp_optimizer.step()
+        self.entropy_temp = torch.exp(self.entropy_temp_log).item()
 
         # Update target q networks with polyak averaging
         for Q, target_Q in zip(self.Qs, self.target_Qs):
@@ -246,6 +236,40 @@ class SAC:
                     p_target.data.add_((1 - polyak_const) * p.data)
 
         return q_loss, policy_loss.item()
+
+    def _sample_traj(
+        self, replay_buffer, max_traj_length, render=False, random_action=False
+    ):
+        observation = self.env.reset()
+        observation = torch.tensor(observation, device=device, dtype=dtype).unsqueeze(0)
+        done = torch.tensor([False], device=device, dtype=torch.bool).unsqueeze(0)
+        episode_rewards = []
+
+        for _ in range(max_traj_length):
+            if render:
+                self.env.render()
+
+            if not random_action:
+                action = self._select_action(observation, deterministic=False)
+            else:
+                action = torch.tensor([self.env.action_space.sample()], dtype=dtype)
+
+            next_observation, reward, done, _ = self.env.step(action)
+            episode_rewards.append(float(reward))
+            next_observation = torch.tensor(
+                next_observation, device=device, dtype=dtype
+            ).unsqueeze(0)
+            reward = torch.tensor([reward], device=device, dtype=dtype).unsqueeze(0)
+            done = torch.tensor([done], device=device, dtype=torch.bool).unsqueeze(0)
+
+            transition = Transition(observation, action, reward, next_observation, done)
+            replay_buffer.append(transition)
+            observation = next_observation
+
+            if done:
+                break
+
+        return sum(episode_rewards)
 
     def train(self, args):
         """ Trains q and policy network """
@@ -278,91 +302,49 @@ class SAC:
         )
         replay_buffer = deque(maxlen=args.max_buffer_size)
         rewards = []
-        step_count = 0
 
         try:
-            for episode in count():
-                observation = self.env.reset()
-                observation = torch.tensor(
-                    observation, device=device, dtype=dtype
-                ).unsqueeze(0)
-                done = torch.tensor([False], device=device, dtype=torch.bool).unsqueeze(
-                    0
+            print("Collecting Random Experience ...")
+            for i in range(args.init_samples):
+                self._sample_traj(
+                    replay_buffer, args.max_traj_length, random_action=True
                 )
-                episode_rewards = []
+                if (i+1) % (args.init_samples // 10) == 0 or i == 0:
+                    print(f"{(i+1) // (args.init_samples // 10) * 10}% Complete")
 
-                for _ in range(args.max_traj_length):
-                    if args.mode.lower() == "train_render":
-                        self.env.render()
-                    step_count += 1
-
-                    action = self._select_action(
-                        observation,
-                        select_after=args.act_after,
-                        step_count=0,
-                        deterministic=False,
+            print("Training while on policy ...")
+            for e in range(args.epochs):
+                q_loss, policy_loss = None, None
+                for i in range(args.updates_per_epoch):
+                    q_loss, policy_loss = self._update(
+                        replay_buffer,
+                        args.batch_size,
+                        q_optimizers,
+                        policy_optimizer,
+                        args.discounting,
+                        args.polyack,
+                        entropy_temp_optimizer,
                     )
-                    next_observation, reward, done, _ = self.env.step(action[0])
-                    episode_rewards.append(float(reward))
-                    next_observation = torch.tensor(
-                        next_observation, device=device, dtype=dtype
-                    ).unsqueeze(0)
-                    reward = torch.tensor(
-                        [reward], device=device, dtype=dtype
-                    ).unsqueeze(0)
-                    done = torch.tensor(
-                        [done], device=device, dtype=torch.bool
-                    ).unsqueeze(0)
 
-                    transition = Transition(
-                        observation, action, reward, next_observation, done
+                for _ in range(args.samples_per_epoch):
+                    r = self._sample_traj(
+                        replay_buffer, args.max_traj_length, args.render
                     )
-                    replay_buffer.append(transition)
-                    observation = next_observation
+                    rewards.append(r)
 
-                    # Update the Deep Q Network if sufficient transitions available every interval
-                    if (
-                        step_count >= args.update_after
-                        and step_count % args.update_every == 0
-                    ):
-                        q_loss, policy_loss = self._update(
-                            replay_buffer,
-                            args.batch_size,
-                            q_optimizers,
-                            policy_optimizer,
-                            args.discounting,
-                            args.polyack,
-                            entropy_temp_optimizer,
-                            args.grad_norm_clip,
-                        )
-
-                    if args.checkpoint_every is not None:
-                        if (
-                            step_count >= args.update_after
-                            and step_count % args.checkpoint_every == 0
-                        ):
-                            self.save(logdir.joinpath(f"model_{step_count}.pt"))
-
-                    if done or step_count == args.timesteps:
-                        break
-
-                if step_count == args.timesteps:
-                    break
+                if args.save_every is not None:
+                    if e % args.save_every == 0:
+                        self.save()
 
                 # Log rewards and losses
-                total_episode_reward = sum(episode_rewards)
-                rewards.append(total_episode_reward)
                 if args.verbose:
                     print(
-                        f"Episode {episode+1} (Step Count = {step_count}) | Reward = {total_episode_reward:.2f} | ",
+                        f"Epoch {e+1}: Reward = {np.mean(rewards[-args.samples_per_epoch:]):.2f} | ",
                         end="",
                     )
-                    if step_count >= args.update_after:
-                        print(
-                            f" Q Loss = {q_loss:.2f} | Policy Loss = {policy_loss:.2f} | {self.entropy_temp}"
-                        )
-                    else:
-                        print("Collecting Experience")
+                    print(
+                        f" Q Loss = {q_loss:.2f} | Policy Loss = {policy_loss:.2f} | {self.entropy_temp:.4f}"
+                    )
 
         except KeyboardInterrupt:
             print(f"Training interrupted by user\n")
@@ -383,10 +365,6 @@ class SAC:
             plt.ylabel("Rewards")
             self.save(logdir.joinpath("model.pt"))
             plt.savefig(logdir.joinpath(f"rewards_plot.png"))
-            # latest_path = Path(args.logdir).joinpath("latest")
-            # if latest_path.exists():
-            #     latest_path.unlink()
-            # latest_path.symlink_to(logdir, target_is_directory=True)
 
     def save(self, path):
         """ Save model parameters """
@@ -434,7 +412,7 @@ class SAC:
             episode_rewards = []
 
             while not done:
-                if args.mode.lower() == "test_render":
+                if args.render:
                     self.env.render()
 
                 action = self._select_action(observation, deterministic=deterministic)
@@ -474,21 +452,35 @@ if __name__ == "__main__":
         "--mode",
         "-m",
         default="train",
-        choices=["train", "test", "train_render", "test_render"],
+        choices=["train", "test"],
         help="Training or test mode.",
     )
     parser.add_argument("--xpid", default=None, help="Experiment id (default: None).")
 
     parser.add_argument(
-        "--timesteps",
-        "-t",
-        default=10_000,
+        "--epochs",
+        default=1000,
         type=int,
-        metavar="T",
-        help="Total environment steps to train for.",
+        metavar="E",
+        help="Total epochs to train for.",
     )
     parser.add_argument(
-        "--test_episodes", default=None, type=int, help="Total episodes to test for."
+        "--init_samples",
+        default=1000,
+        type=int,
+        help="Initial number of trajectory to sample randomly.",
+    )
+    parser.add_argument(
+        "--updates_per_epoch",
+        default=100,
+        type=int,
+        help="Total episodes to update every epoch.",
+    )
+    parser.add_argument(
+        "--samples_per_epoch",
+        default=50,
+        type=int,
+        help="Total episodes to update every epoch.",
     )
     parser.add_argument(
         "--max_traj_length",
@@ -501,37 +493,22 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--max_buffer_size",
-        default=5000,
+        default=1000 * 250,
         type=int,
         help="Maximum size of replay buffer.",
     )
-    parser.add_argument(
-        "--update_after",
-        default=500,
-        type=int,
-        help="Timesteps to start updating after.",
-    )
-    parser.add_argument(
-        "--update_every", default=1, type=int, help="Timsteps interval to update after."
-    )
-    parser.add_argument(
-        "--act_after",
-        default=1000,
-        type=int,
-        help="Timsteps to start selecting action from policy after.",
-    )
 
     parser.add_argument(
-        "--policy_lr", default=1e-3, type=float, help="Policy learning rate."
+        "--policy_lr", default=3e-4, type=float, help="Policy learning rate."
     )
     parser.add_argument(
-        "--q_lr", default=1e-3, type=float, help="Q function learning rate."
+        "--q_lr", default=3e-4, type=float, help="Q function learning rate."
     )
     parser.add_argument(
-        "--temp_lr", default=5e-4, type=float, help="Entropy temperature learning rate."
+        "--temp_lr", default=3e-4, type=float, help="Entropy temperature learning rate."
     )
     parser.add_argument(
-        "--discounting", default=0.99, type=float, help="Discounting factor."
+        "--discounting", default=0.95, type=float, help="Discounting factor."
     )
     parser.add_argument(
         "--polyack", default=0.995, type=float, help="Poly32ack averaging constant."
@@ -541,15 +518,15 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_false",
-        help="Enable to log progres to console.",
+        "--verbose", "-v", action="store_true", help="Enable to log progres to console."
     )
     parser.add_argument(
-        "--checkpoint_every",
+        "--render", "-r", action="store_true", help="Enable rendering of environment."
+    )
+    parser.add_argument(
+        "--save_every",
         type=int,
-        default=5000,
+        default=None,
         help="Timesteps to checkpoint model every.",
     )
     parser.add_argument(
@@ -563,14 +540,13 @@ if __name__ == "__main__":
         import gym
 
         env_name = flags.env
-        render = flags.mode == "test_render" or flags.mode == "train_render"
         if "Bullet" in env_name:
             import pybullet_envs
 
             try:
-                env = gym.make(env_name, isDiscrete=False, renders=render)
+                env = gym.make(env_name, isDiscrete=False, renders=flags.render)
             except TypeError:
-                env = gym.make(env_name, renders=render)
+                env = gym.make(env_name, renders=flags.render)
         else:
             env = gym.make(env_name)
         return env
@@ -586,6 +562,6 @@ if __name__ == "__main__":
     if args.mode.lower() == "train":
         model = SAC(env, 32, 32)
         model.train(args)
-    elif args.mode.lower() == "test" or args.mode.lower() == "test_render":
+    elif args.mode.lower() == "test":
         model = SAC(env, 32, 32)
         model.test(args)

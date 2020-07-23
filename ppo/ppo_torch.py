@@ -121,19 +121,22 @@ class PPO:
             v = [self.value(o) for o in obs]
             adv = [disc_r[i] - v[i] for i in range(len(batch))]
             old_logits = [torch.stack(traj.logits) for traj in batch]
-            old_logprobs = [-F.cross_entropy(old_logits[i], a[i]) for i in range(len(batch))] 
+            old_logprobs = [
+                -F.cross_entropy(old_logits[i], a[i]) for i in range(len(batch))
+            ]
 
         # update policy
         for j in range(hp["n_policy_updates"]):
-            policy_loss = torch.zeros(
-                1, device=device, dtype=dtype, requires_grad=True
-            )
+            policy_loss = torch.zeros(1, device=device, dtype=dtype, requires_grad=True)
             for i, traj in enumerate(batch):
                 curr_logits = self.policy(obs[i])
                 curr_logprobs = -F.cross_entropy(curr_logits, a[i])
                 ratio = torch.exp(curr_logprobs - old_logprobs[i])
                 clipped_ratio = torch.clamp(ratio, 1 - hp["epsilon"], 1 + hp["epsilon"])
-                policy_loss = policy_loss + torch.min(ratio * adv[i], clipped_ratio * adv[i]).mean()
+                policy_loss = (
+                    policy_loss
+                    + torch.min(ratio * adv[i], clipped_ratio * adv[i]).mean()
+                )
 
             policy_loss = policy_loss / len(batch)
             policy_optim.zero_grad()
@@ -233,7 +236,9 @@ class PPO:
                     batch.append(traj)
 
                 # Update value and policy
-                p_loss, v_loss = self._update(batch, hp, policy_optim, value_optim, writer)
+                p_loss, v_loss = self._update(
+                    batch, hp, policy_optim, value_optim, writer
+                )
 
                 # Log rewards and losses
                 avg_episode_reward = np.mean(epoch_rewards[-episodes_per_epoch:])
@@ -258,7 +263,9 @@ class PPO:
             print(
                 f"\nTraining Completed in {(datetime.datetime.now() - start_time).seconds} seconds"
             )
-            model.save(log_path.joinpath(f"{self.__class__.__name__}_{self.env_name}.pt"))
+            model.save(
+                log_path.joinpath(f"{self.__class__.__name__}_{self.env_name}.pt")
+            )
             if PLOT_REWARDS:
                 plt.plot(rewards)
                 plt.savefig(
@@ -324,7 +331,9 @@ class PPO:
 
         env.close()
         print(f"\nAverage Reward for an episode = {np.mean(rewards):.2f}")
-        print(f"Evaluation Completed in {(datetime.datetime.now() - start_time).seconds} seconds")
+        print(
+            f"Evaluation Completed in {(datetime.datetime.now() - start_time).seconds} seconds"
+        )
 
 
 if __name__ == "__main__":
