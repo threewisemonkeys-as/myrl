@@ -16,6 +16,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from torch import square
 import torch.nn as nn
 
 dtype = torch.double
@@ -250,9 +251,10 @@ class SAC:
                 self.env.render()
 
             if not random_action:
-                action = self._select_action(observation, deterministic=False)
+                action = self._select_action(observation, deterministic=False).view(-1)
             else:
-                action = torch.tensor([self.env.action_space.sample()], device=device, dtype=dtype)
+                action = torch.tensor(self.env.action_space.sample(), device=device, dtype=dtype).view(-1)
+
 
             next_observation, reward, done, _ = self.env.step(action)
             episode_rewards.append(float(reward))
