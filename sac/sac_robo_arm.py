@@ -256,7 +256,7 @@ class SAC:
                 action = torch.tensor(self.env.action_space.sample(), device=device, dtype=dtype).view(-1)
 
 
-            next_observation, reward, done, _ = self.env.step(action)
+            next_observation, reward, done, _ = self.env.step(action.cpu())
             episode_rewards.append(float(reward))
             next_observation = torch.tensor(
                 next_observation, device=device, dtype=dtype
@@ -418,7 +418,7 @@ class SAC:
                     self.env.render()
 
                 action = self._select_action(observation, deterministic=deterministic)
-                next_observation, reward, done, _ = self.env.step(action.detach())
+                next_observation, reward, done, _ = self.env.step(action.cpu())
                 episode_rewards.append(float(reward))
                 next_observation = torch.tensor(
                     next_observation, device=device, dtype=dtype
